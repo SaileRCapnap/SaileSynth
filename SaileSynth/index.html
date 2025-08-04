@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Web Synth</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#121212">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111;
+      color: white;
+      font-family: monospace;
+    }
+
+    #controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px;
+      background: #222;
+    }
+
+    select, button {
+      font-size: 1em;
+      background: #333;
+      color: white;
+      border: 1px solid #555;
+      padding: 4px 8px;
+    }
+
+    #keyboard {
+      display: grid;
+      gap: 4px;
+      padding: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(40px, 1fr));
+    }
+
+    .key {
+      background: #1c1c1c;
+      border: 2px solid #333;
+      text-align: center;
+      padding: 20px 0;
+      border-radius: 6px;
+      box-shadow: 0 2px 2px #000;
+      transition: all 0.1s ease;
+      user-select: none;
+    }
+
+    .key.active {
+      background: #44c;
+      box-shadow: 0 0 10px #44c;
+    }
+
+    .key.black {
+      background: #333;
+    }
+
+    .key-label {
+      font-size: 0.8em;
+      opacity: 0.8;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <label>Octave:
+      <select id="octaveSelect">
+        <option value="1">Octave 1</option>
+        <option value="2">Octave 2</option>
+        <option value="3" selected>Octave 3</option>
+        <option value="4">Octave 4</option>
+        <option value="5">Octave 5</option>
+      </select>
+    </label>
+    <button id="recordBtn">Start Recording</button>
+  </div>
+
+  <div id="keyboard"></div>
+
+  <script>
+    const notes = [
+      { note: "C", semitone: 0 },
+      { note: "C#", semitone: 1 },
+      { note: "D", semitone: 2 },
+      { note: "D#", semitone: 3 },
+      { note: "E", semitone: 4 },
+      { note: "F", semitone: 5 },
+      { note: "F#", semitone: 6 },
+      { note: "G", semitone: 7 },
+      { note: "G#", semitone: 8 },
+      { note: "A", semitone: 9 },
+      { note: "A#", semitone: 10 },
+      { note: "B", semitone: 11 }
+    ];
+
+    let currentOctave = parseInt(localStorage.getItem('octave')) || 3;
+    const octaveSelect = document.getElementById("octaveSelect");
+    octaveSelect.value = currentOctave;
+    octaveSelect.addEventListener("change", e => {
+      currentOctave = parseInt(e.target.value);
+      localStorage.setItem('octave', currentOctave);
+      renderKeyboard();
+    });
+
+    const keyboard = document.getElementById("keyboard");
+    let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const keysDown = new Map();
+
+    function getFrequency(semitoneOffset) {
+      return 440 * Math.pow(2, (semitoneOffset - 57) / 12);
+    }
+
+    function playNote(note, octave, keyEl) {
+      const semitone = note.semitone + (octave * 12);
+      const freq = getFrequency(semitone);
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      // Dulcimer/bagpipe hybrid: start with square, then soften
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+
+      keysDown.set(keyEl, { osc, gain });
+      keyEl.classList.add("active");
+    }
+
+    function stopNote(keyEl) {
+      const active = keysDown.get(keyEl);
+      if (active) {
+        active.gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+        active.osc.stop(audioCtx.currentTime + 0.5);
+        keysDown.delete(keyEl);
+      }
+      keyEl.classList.remove("active");
+    }
+
+    function renderKeyboard() {
+      keyboard.innerHTML = "";
+      notes.forEach((noteObj, i) => {
+        const key = document.createElement("div");
+        key.classList.add("key");
+        if (noteObj.note.includes("#")) key.classList.add("black");
+        key.innerHTML = `<div class="key-label">${noteObj.note}</div>`;
+
+        key.addEventListener("touchstart", e => {
+          e.preventDefault();
+          playNote(noteObj, currentOctave, key);
+        }, { passive: false });
+
+        key.addEventListener("mousedown", () => playNote(noteObj, currentOctave, key));
+        key.addEventListener("mouseup", () => stopNote(key));
+        key.addEventListener("mouseleave", () => stopNote(key));
+        key.addEventListener("touchend", () => stopNote(key));
+
+        keyboard.appendChild(key);
+      });
+    }
+
+    // --- Recording ---
+    let recorder, audioChunks = [], recording = false;
+    const recordBtn = document.getElementById("recordBtn");
+
+    recordBtn.addEventListener("click", () => {
+      if (!recording) {
+        startRecording();
+      } else {
+        stopRecording();
+      }
+    });
+
+    async function startRecording() {
+      const dest = audioCtx.createMediaStreamDestination();
+      recorder = new MediaRecorder(dest.stream);
+      audioCtx.destination.connect(dest);
+
+      recorder.ondataavailable = e => audioChunks.push(e.data);
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunks, { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `recording-${Date.now()}.wav`;
+        a.click();
+        audioChunks = [];
+      };
+
+      recorder.start();
+      recordBtn.textContent = "Stop Recording";
+      recording = true;
+    }
+
+    function stopRecording() {
+      recorder.stop();
+      recordBtn.textContent = "Start Recording";
+      recording = false;
+    }
+
+    renderKeyboard();
+  </script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').then(reg => {
+        console.log('Service worker registered ✅', reg);
+      }).catch(err => {
+        console.error('Service worker registration failed ❌', err);
+      });
+    });
+  }
+</script>
+</body>
+</html>
